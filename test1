@@ -1,0 +1,195 @@
+from flask import Flask, jsonify, request
+import RPi.GPIO as GPIO
+import requests
+import threading
+import time
+
+app = Flask(__name__)
+
+# GPIO Pin Configuration
+# LEDs
+LED_DOWNTIME = 8     # GPIO8 for downtime LED
+LED_MAINTENANCE = 7  # GPIO7 for maintenance LED
+LED_EMERGENCY = 12   # GPIO12 for emergency LED
+LED_DOWNTIME_ALERT = 18  # GPIO18 for flashing downtime alert LED
+
+# Buttons (grounded when clicked, using internal pull-up resistors)
+BUTTON_DOWNTIME = 11    # GPIO11 for downtime button
+BUTTON_MAINTENANCE = 5  # GPIO5 for maintenance button
+BUTTON_EMERGENCY = 6    # GPIO6 for emergency button
+BUTTON_WORKING = 13     # GPIO13 for working state button
+
+# Main Flask app API base URL (adjust to your main app's IP/port)
+MAIN_API_BASE_URL = "http://localhost:5000/api"
+
+# Team name
+TEAM_NAME = "Team1"
+
+# Global state
+led_status = {
+    "downtime": False,
+    "maintenance": False,
+    "emergency": False,
+    "downtime_alert": False
+}
+last_working_press = time.time()  # Timestamp of last working button press
+downtime_start = None  # Timestamp when downtime alert begins
+
+# Setup GPIO
+def setup_gpio():
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+    
+    # Setup LEDs as outputs
+    GPIO.setup(LED_DOWNTIME, GPIO.OUT)
+    GPIO.setup(LED_MAINTENANCE, GPIO.OUT)
+    GPIO.setup(LED_EMERGENCY, GPIO.OUT)
+    GPIO.setup(LED_DOWNTIME_ALERT, GPIO.OUT)
+    
+    # Initially turn off all LEDs
+    GPIO.output(LED_DOWNTIME, GPIO.LOW)
+    GPIO.output(LED_MAINTENANCE, GPIO.LOW)
+    GPIO.output(LED_EMERGENCY, GPIO.LOW)
+    GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+    
+    # Setup buttons with pull-up resistors
+    GPIO.setup(BUTTON_DOWNTIME, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(BUTTON_MAINTENANCE, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(BUTTON_EMERGENCY, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(BUTTON_WORKING, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+# Function to send API request to main app
+def send_event(event_type, team):
+    try:
+        url = f"{MAIN_API_BASE_URL}/{event_type}/{team}"
+        response = requests.post(url)
+        if response.status_code == 200:
+            print(f"Successfully sent {event_type} event for {team}")
+        else:
+            print(f"Failed to send {event_type} event: {response.text}")
+    except Exception as e:
+        print(f"Error sending {event_type} event: {e}")
+
+# Button callback functions
+def downtime_callback(channel):
+    if GPIO.input(channel) == GPIO.LOW:  # Button pressed (LOW with pull-up)
+        print("Downtime button pressed")
+        GPIO.output(LED_DOWNTIME, GPIO.HIGH)
+        GPIO.output(LED_MAINTENANCE, GPIO.LOW)
+        GPIO.output(LED_EMERGENCY, GPIO.LOW)
+        led_status["downtime"] = True
+        led_status["maintenance"] = False
+        led_status["emergency"] = False
+        send_event("downtime", TEAM_NAME)
+        time.sleep(0.2)  # Debounce
+
+def maintenance_callback(channel):
+    if GPIO.input(channel) == GPIO.LOW:
+        print("Maintenance button pressed")
+        GPIO.output(LED_DOWNTIME, GPIO.LOW)
+        GPIO.output(LED_MAINTENANCE, GPIO.HIGH)
+        GPIO.output(LED_EMERGENCY, GPIO.LOW)
+        led_status["downtime"] = False
+        led_status["maintenance"] = True
+        led_status["emergency"] = False
+        send_event("maintenance", TEAM_NAME)
+        time.sleep(0.2)  # Debounce
+
+def emergency_callback(channel):
+    if GPIO.input(channel) == GPIO.LOW:
+        print("Emergency button pressed")
+        GPIO.output(LED_DOWNTIME, GPIO.LOW)
+        GPIO.output(LED_MAINTENANCE, GPIO.LOW)
+        GPIO.output(LED_EMERGENCY, GPIO.HIGH)
+        led_status["downtime"] = False
+        led_status["maintenance"] = False
+        led_status["emergency"] = True
+        send_event("emergency", TEAM_NAME)
+        time.sleep(0.2)  # Debounce
+
+def working_callback(channel):
+    global last_working_press, downtime_start
+    if GPIO.input(channel) == GPIO.LOW:
+        print("Working button pressed")
+        last_working_press = time.time()
+        if downtime_start:  # If downtime was active, calculate duration
+            downtime_duration = time.time() - downtime_start
+            print(f"Downtime ended. Duration: {downtime_duration:.2f} seconds")
+            downtime_start = None
+        GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+        led_status["downtime_alert"] = False
+        time.sleep(0.2)  # Debounce
+
+# Function to monitor working state and flash LED if not clicked
+def monitor_working_state():
+    global downtime_start
+    while True:
+        if time.time() - last_working_press > 60:  # 1 minute timeout
+            if not downtime_start:  # Start downtime tracking
+                downtime_start = time.time()
+                print("Machine not working - Downtime alert started")
+                send_event("downtime", TEAM_NAME)  # Trigger downtime event
+            led_status["downtime_alert"] = True
+            GPIO.output(LED_DOWNTIME_ALERT, GPIO.HIGH)
+            time.sleep(0.5)
+            GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+            time.sleep(0.5)
+        else:
+            GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+            led_status["downtime_alert"] = False
+        time.sleep(0.1)
+
+# Setup event detection for buttons
+def setup_events():
+    GPIO.add_event_detect(BUTTON_DOWNTIME, GPIO.FALLING, callback=downtime_callback, bouncetime=200)
+    GPIO.add_event_detect(BUTTON_MAINTENANCE, GPIO.FALLING, callback=maintenance_callback, bouncetime=200)
+    GPIO.add_event_detect(BUTTON_EMERGENCY, GPIO.FALLING, callback=emergency_callback, bouncetime=200)
+    GPIO.add_event_detect(BUTTON_WORKING, GPIO.FALLING, callback=working_callback, bouncetime=200)
+
+# Route to get current LED status
+@app.route('/status', methods=['GET'])
+def get_status():
+    downtime_duration = (time.time() - downtime_start) if downtime_start else 0
+    return jsonify({
+        "team": TEAM_NAME,
+        "led_status": led_status,
+        "downtime_duration": downtime_duration if downtime_start else None
+    })
+
+# Route to turn off all LEDs (called by main app)
+@app.route('/turn_off_leds', methods=['POST'])
+def turn_off_leds():
+    GPIO.output(LED_DOWNTIME, GPIO.LOW)
+    GPIO.output(LED_MAINTENANCE, GPIO.LOW)
+    GPIO.output(LED_EMERGENCY, GPIO.LOW)
+    GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+    led_status["downtime"] = False
+    led_status["maintenance"] = False
+    led_status["emergency"] = False
+    led_status["downtime_alert"] = False
+    return jsonify({"message": f"All LEDs turned off for {TEAM_NAME}"}), 200
+
+# Main function to start the app
+def main():
+    setup_gpio()
+    setup_events()
+    
+    # Start the working state monitoring thread
+    monitor_thread = threading.Thread(target=monitor_working_state, daemon=True)
+    monitor_thread.start()
+    
+    print("Raspberry Pi Event System Running...")
+    print(f"Team: {TEAM_NAME}")
+    print("Press buttons to trigger events")
+    print("Press working button within 1 minute to prevent downtime alert")
+    
+    # Run Flask app
+    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        GPIO.cleanup()
