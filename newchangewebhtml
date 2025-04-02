@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Machine Status - {{ machine_name }}</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1 { text-align: center; color: #333; }
+        .status-box { margin: 20px 0; font-size: 18px; }
+        .reason-buttons { margin: 20px 0; }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            background-color: #3498db;
+            color: white;
+        }
+        button:hover { background-color: #2980b9; }
+        #confirmBtn { background-color: #27ae60; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Machine Status - {{ machine_name }}</h1>
+        <div class="status-box">
+            <p><strong>Status:</strong> <span id="status">Working</span></p>
+            <p><strong>Time:</strong> <span id="time">0.00 s</span></p>
+            <p><strong>Countdown:</strong> <span id="countdown"></span></p>
+            <p><strong>Reason:</strong> <span id="reason"></span></p>
+        </div>
+        <div class="reason-buttons" id="reasonButtons" style="display: none;">
+            <button onclick="selectReason('Employee Break')">Employee Break</button>
+            <button onclick="selectReason('Material Change')">Material Change</button>
+            <button onclick="selectReason('Quality')">Quality</button>
+            <button onclick="selectReason('Production')">Production</button>
+            <button onclick="selectReason('IT')">IT</button>
+            <button onclick="selectReason('Maintenance')">Maintenance</button>
+            <button onclick="selectReason('Others')">Others</button>
+        </div>
+        <button id="confirmBtn" onclick="confirmDowntime()" style="display: none;">Confirm Downtime</button>
+    </div>
+
+    <script>
+        const socket = io();
+
+        socket.on('status_update', function(data) {
+            document.getElementById('status').textContent = data.status;
+            document.getElementById('time').textContent = data.time;
+            document.getElementById('countdown').textContent = data.countdown;
+            document.getElementById('reason').textContent = data.reason;
+            document.getElementById('reasonButtons').style.display = data.status === 'Downtime' ? 'block' : 'none';
+            document.getElementById('confirmBtn').style.display = data.status === 'Downtime' && data.reason && data.reason !== 'Select a reason' ? 'block' : 'none';
+        });
+
+        function selectReason(reason) {
+            socket.emit('select_reason', { reason: reason });
+        }
+
+        function confirmDowntime() {
+            socket.emit('confirm_downtime');
+        }
+    </script>
+</body>
+</html>
