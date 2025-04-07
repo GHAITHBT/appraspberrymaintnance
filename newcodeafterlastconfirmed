@@ -134,6 +134,8 @@ def reset_system(event_type=None, end_user_id=None, end_comment=None):
         duration = time.time() - event_start_time
         logger.info(f"Event {event_type} ended for {TEAM_NAME}. Duration: {duration:.2f} seconds")
         print(f"Event {event_type} ended. Duration: {duration:.2f} seconds")
+        # Assign the end_comment parameter to the global variable
+        globals()['end_comment'] = end_comment  # Explicitly update the global end_comment
         send_event_async(f"reset_{event_type}", duration, start_user_id, end_user_id, start_comment, end_comment)
     
     GPIO.output(LED_DOWNTIME, GPIO.LOW)
@@ -146,7 +148,7 @@ def reset_system(event_type=None, end_user_id=None, end_comment=None):
     event_start_time = None
     start_user_id = None
     start_comment = None
-    end_comment = None
+    end_comment = None  # Reset global end_comment here
     is_first_run = True
     awaiting_user_id = False
     logger.info("System reset")
