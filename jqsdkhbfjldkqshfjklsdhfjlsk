@@ -20,12 +20,12 @@ LED_DOWNTIME = 8
 LED_MAINTENANCE = 7
 LED_EMERGENCY = 12
 LED_DOWNTIME_ALERT = 17
-LED_CANCEL = 16  # New LED for cancel button
+LED_CANCEL = 16
 
 BUTTON_DOWNTIME = 11
 BUTTON_MAINTENANCE = 5
 BUTTON_EMERGENCY = 6
-BUTTON_CANCEL = 13  # New cancel button
+BUTTON_CANCEL = 13
 SENSOR_OBSTACLE = 3
 
 # Main Flask app API base URL
@@ -80,12 +80,12 @@ def setup_gpio():
         GPIO.setup(LED_MAINTENANCE, GPIO.OUT)
         GPIO.setup(LED_EMERGENCY, GPIO.OUT)
         GPIO.setup(LED_DOWNTIME_ALERT, GPIO.OUT)
-        GPIO.setup(LED_CANCEL, GPIO.OUT)  # Setup cancel LED
+        GPIO.setup(LED_CANCEL, GPIO.OUT)
         
         GPIO.setup(BUTTON_DOWNTIME, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(BUTTON_MAINTENANCE, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(BUTTON_EMERGENCY, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(BUTTON_CANCEL, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # Setup cancel button
+        GPIO.setup(BUTTON_CANCEL, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(SENSOR_OBSTACLE, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         
         print("Turning on all LEDs for 2 seconds...")
@@ -141,7 +141,9 @@ def reset_system(event_type=None, end_user_id=None, end_comment=None, cancel_rea
         duration = time.time() - event_start_time
         logger.info(f"Event {event_type} ended for {TEAM_NAME}. Duration: {duration:.2f} seconds")
         print(f"Event {event_type} ended. Duration: {duration:.2f} seconds")
-        send_event_async(f"reset_{event_type}", duration, start_user_id, end_user_id, start_comment, end_comment, cancel_reason)
+        # Use "cancel_<event_type>" if cancel_reason is provided, otherwise "reset_<event_type>"
+        event_prefix = "cancel_" if cancel_reason else "reset_"
+        send_event_async(f"{event_prefix}{event_type}", duration, start_user_id, end_user_id, start_comment, end_comment, cancel_reason)
     
     GPIO.output(LED_DOWNTIME, GPIO.LOW)
     GPIO.output(LED_MAINTENANCE, GPIO.LOW)
@@ -297,7 +299,7 @@ def monitor_buttons_and_downtime():
                     print(f"Cancel button PRESSED on GPIO {BUTTON_CANCEL}")
                     awaiting_user_id = True
                     cancel_reason = get_cancel_reason_from_input()
-                    GPIO.output(LED_CANCEL, GPIO.HIGH)  # Turn on cancel LED briefly
+                    GPIO.output(LED_CANCEL, GPIO.HIGH)
                     time.sleep(0.5)
                     GPIO.output(LED_CANCEL, GPIO.LOW)
                     reset_system(selected_led_to_event_type(selected_led), cancel_reason=cancel_reason)
