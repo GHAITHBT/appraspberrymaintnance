@@ -5,6 +5,7 @@ import logging
 import requests
 import socket
 from threading import Thread
+import json
 
 # Setup logging
 logging.basicConfig(
@@ -109,13 +110,14 @@ def send_event_async(event_type, duration=None, user_id=None):
                 "duration": duration,
                 "user_id": user_id if user_id else "N/A"
             }
+            logger.info(f"Sending event to {url} - Details: {json.dumps(data)}")
             response = requests.post(url, json=data, timeout=5)
             if response.status_code == 200:
-                logger.info(f"Successfully sent {event_type} event for {TEAM_NAME} with user_id {user_id}")
+                logger.info(f"Event sent successfully: {event_type} for {TEAM_NAME} - Response: {response.text}")
             else:
-                logger.warning(f"Failed to send {event_type} event: {response.status_code} - {response.text}")
+                logger.warning(f"Failed to send event: {event_type} - Status: {response.status_code} - Response: {response.text}")
         except Exception as e:
-            logger.error(f"Error sending {event_type} event to {url}: {e}")
+            logger.error(f"Error sending {event_type} event to {url}: {e} - Data: {json.dumps(data)}")
     
     Thread(target=send_request, daemon=True).start()
 
@@ -149,6 +151,7 @@ def display_lcd_simulation(message):
 def get_user_id_from_input():
     display_lcd_simulation("Enter User ID: ")
     user_id = input("User ID: ").strip()
+    logger.info(f"User entered ID: {user_id}")
     return user_id if user_id else "N/A"
 
 def monitor_buttons_and_downtime():
