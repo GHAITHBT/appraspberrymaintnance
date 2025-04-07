@@ -37,6 +37,8 @@ selected_led = None
 is_first_run = True
 event_start_time = None
 awaiting_user_id = False
+start_user_id = None
+event_reason = None
 
 def get_ip_address():
     try:
@@ -97,7 +99,7 @@ def setup_gpio():
         logger.error(f"GPIO setup error: {e}")
         print(f"GPIO setup error: {e}")
 
-def send_event_async(event_type, duration=None, user_id=None):
+def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=None, reason=None):
     if TEAM_NAME is None:
         logger.error("Cannot send event: TEAM_NAME not set")
         return
@@ -108,7 +110,9 @@ def send_event_async(event_type, duration=None, user_id=None):
             data = {
                 "machine": TEAM_NAME,
                 "duration": duration,
-                "user_id": user_id if user_id else "N/A"
+                "start_user_id": start_user_id if start_user_id else "N/A",
+                "end_user_id": end_user_id if end_user_id else "N/A",
+                "reason": reason if reason else ""
             }
             logger.info(f"Sending event to {url} - Details: {json.dumps(data)}")
             response = requests.post(url, json=data, timeout=5)
@@ -121,14 +125,14 @@ def send_event_async(event_type, duration=None, user_id=None):
     
     Thread(target=send_request, daemon=True).start()
 
-def reset_system(event_type=None, user_id=None):
-    global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, awaiting_user_id
+def reset_system(event_type=None, end_user_id=None):
+    global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, awaiting_user_id, start_user_id, event_reason
     duration = None
     if event_type and event_start_time:
         duration = time.time() - event_start_time
         logger.info(f"Event {event_type} ended for {TEAM_NAME}. Duration: {duration:.2f} seconds")
         print(f"Event {event_type} ended. Duration: {duration:.2f} seconds")
-        send_event_async(f"reset_{event_type}", duration, user_id)
+        send_event_async(f"reset_{event_type}", duration, start_user_id, end_user_id, event_reason)
     
     GPIO.output(LED_DOWNTIME, GPIO.LOW)
     GPIO.output(LED_MAINTENANCE, GPIO.LOW)
@@ -138,6 +142,8 @@ def reset_system(event_type=None, user_id=None):
     downtime_triggered = False
     selected_led = None
     event_start_time = None
+    start_user_id = None
+    event_reason = None
     is_first_run = True
     awaiting_user_id = False
     logger.info("System reset")
@@ -148,14 +154,20 @@ def display_lcd_simulation(message):
     print(f"LCD: {message}")
     print("="*20 + "\n")
 
-def get_user_id_from_input():
-    display_lcd_simulation("Enter User ID: ")
+def get_user_id_from_input(prompt="Enter User ID: "):
+    display_lcd_simulation(prompt)
     user_id = input("User ID: ").strip()
     logger.info(f"User entered ID: {user_id}")
     return user_id if user_id else "N/A"
 
+def get_reason_from_input():
+    display_lcd_simulation("Enter Reason (or press Enter to skip): ")
+    reason = input("Reason: ").strip()
+    logger.info(f"User entered reason: {reason}")
+    return reason if reason else ""
+
 def monitor_buttons_and_downtime():
-    global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, awaiting_user_id
+    global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, awaiting_user_id, start_user_id, event_reason
     
     prev_sensor = GPIO.HIGH
     prev_downtime = GPIO.HIGH
@@ -195,8 +207,8 @@ def monitor_buttons_and_downtime():
                     print(f"Downtime button PRESSED on GPIO {BUTTON_DOWNTIME}")
                     if selected_led == LED_DOWNTIME:
                         awaiting_user_id = True
-                        user_id = get_user_id_from_input()
-                        reset_system("downtime", user_id)
+                        end_user_id = get_user_id_from_input("Enter User ID to end downtime: ")
+                        reset_system("downtime", end_user_id)
                     elif downtime_triggered and not selected_led:
                         GPIO.output(LED_MAINTENANCE, GPIO.LOW)
                         GPIO.output(LED_EMERGENCY, GPIO.LOW)
@@ -205,8 +217,9 @@ def monitor_buttons_and_downtime():
                         downtime_triggered = False
                         event_start_time = time.time()
                         awaiting_user_id = True
-                        user_id = get_user_id_from_input()
-                        send_event_async("downtime", user_id=user_id)
+                        start_user_id = get_user_id_from_input("Enter User ID to start downtime: ")
+                        event_reason = get_reason_from_input()
+                        send_event_async("downtime", start_user_id=start_user_id, reason=event_reason)
                         awaiting_user_id = False
                 
                 elif prev_maintenance == GPIO.HIGH and curr_maintenance == GPIO.LOW:
@@ -214,8 +227,8 @@ def monitor_buttons_and_downtime():
                     print(f"Maintenance button PRESSED on GPIO {BUTTON_MAINTENANCE}")
                     if selected_led == LED_MAINTENANCE:
                         awaiting_user_id = True
-                        user_id = get_user_id_from_input()
-                        reset_system("maintenance", user_id)
+                        end_user_id = get_user_id_from_input("Enter User ID to end maintenance: ")
+                        reset_system("maintenance", end_user_id)
                     elif downtime_triggered and not selected_led:
                         GPIO.output(LED_DOWNTIME, GPIO.LOW)
                         GPIO.output(LED_EMERGENCY, GPIO.LOW)
@@ -224,8 +237,9 @@ def monitor_buttons_and_downtime():
                         downtime_triggered = False
                         event_start_time = time.time()
                         awaiting_user_id = True
-                        user_id = get_user_id_from_input()
-                        send_event_async("maintenance", user_id=user_id)
+                        start_user_id = get_user_id_from_input("Enter User ID to start maintenance: ")
+                        event_reason = get_reason_from_input()
+                        send_event_async("maintenance", start_user_id=start_user_id, reason=event_reason)
                         awaiting_user_id = False
                 
                 elif prev_emergency == GPIO.HIGH and curr_emergency == GPIO.LOW:
@@ -233,8 +247,8 @@ def monitor_buttons_and_downtime():
                     print(f"Emergency button PRESSED on GPIO {BUTTON_EMERGENCY}")
                     if selected_led == LED_EMERGENCY:
                         awaiting_user_id = True
-                        user_id = get_user_id_from_input()
-                        reset_system("emergency", user_id)
+                        end_user_id = get_user_id_from_input("Enter User ID to end emergency: ")
+                        reset_system("emergency", end_user_id)
                     elif downtime_triggered and not selected_led:
                         GPIO.output(LED_DOWNTIME, GPIO.LOW)
                         GPIO.output(LED_MAINTENANCE, GPIO.LOW)
@@ -243,8 +257,9 @@ def monitor_buttons_and_downtime():
                         downtime_triggered = False
                         event_start_time = time.time()
                         awaiting_user_id = True
-                        user_id = get_user_id_from_input()
-                        send_event_async("emergency", user_id=user_id)
+                        start_user_id = get_user_id_from_input("Enter User ID to start emergency: ")
+                        event_reason = get_reason_from_input()
+                        send_event_async("emergency", start_user_id=start_user_id, reason=event_reason)
                         awaiting_user_id = False
             
             if selected_led and not awaiting_user_id:
