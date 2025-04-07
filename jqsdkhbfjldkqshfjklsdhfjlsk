@@ -20,10 +20,12 @@ LED_DOWNTIME = 8
 LED_MAINTENANCE = 7
 LED_EMERGENCY = 12
 LED_DOWNTIME_ALERT = 17
+LED_CANCEL = 16  # New LED for cancel button
 
 BUTTON_DOWNTIME = 11
 BUTTON_MAINTENANCE = 5
 BUTTON_EMERGENCY = 6
+BUTTON_CANCEL = 13  # New cancel button
 SENSOR_OBSTACLE = 3
 
 # Main Flask app API base URL
@@ -78,10 +80,12 @@ def setup_gpio():
         GPIO.setup(LED_MAINTENANCE, GPIO.OUT)
         GPIO.setup(LED_EMERGENCY, GPIO.OUT)
         GPIO.setup(LED_DOWNTIME_ALERT, GPIO.OUT)
+        GPIO.setup(LED_CANCEL, GPIO.OUT)  # Setup cancel LED
         
         GPIO.setup(BUTTON_DOWNTIME, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(BUTTON_MAINTENANCE, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(BUTTON_EMERGENCY, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(BUTTON_CANCEL, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # Setup cancel button
         GPIO.setup(SENSOR_OBSTACLE, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         
         print("Turning on all LEDs for 2 seconds...")
@@ -89,18 +93,20 @@ def setup_gpio():
         GPIO.output(LED_MAINTENANCE, GPIO.HIGH)
         GPIO.output(LED_EMERGENCY, GPIO.HIGH)
         GPIO.output(LED_DOWNTIME_ALERT, GPIO.HIGH)
+        GPIO.output(LED_CANCEL, GPIO.HIGH)
         time.sleep(2)
         GPIO.output(LED_DOWNTIME, GPIO.LOW)
         GPIO.output(LED_MAINTENANCE, GPIO.LOW)
         GPIO.output(LED_EMERGENCY, GPIO.LOW)
         GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+        GPIO.output(LED_CANCEL, GPIO.LOW)
         
         logger.info("GPIO setup completed successfully")
     except Exception as e:
         logger.error(f"GPIO setup error: {e}")
         print(f"GPIO setup error: {e}")
 
-def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=None, start_comment=None, end_comment=None):
+def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=None, start_comment=None, end_comment=None, cancel_reason=None):
     if TEAM_NAME is None:
         logger.error("Cannot send event: TEAM_NAME not set")
         return
@@ -114,7 +120,8 @@ def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=
                 "start_user_id": start_user_id if start_user_id else "N/A",
                 "end_user_id": end_user_id if end_user_id else "N/A",
                 "start_comment": start_comment if start_comment else "",
-                "end_comment": end_comment if end_comment else ""
+                "end_comment": end_comment if end_comment else "",
+                "cancel_reason": cancel_reason if cancel_reason else ""
             }
             logger.info(f"Sending event to {url} - Details: {json.dumps(data)}")
             response = requests.post(url, json=data, timeout=5)
@@ -127,28 +134,27 @@ def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=
     
     Thread(target=send_request, daemon=True).start()
 
-def reset_system(event_type=None, end_user_id=None, end_comment=None):
-    # Only declare globals that are not parameters
+def reset_system(event_type=None, end_user_id=None, end_comment=None, cancel_reason=None):
     global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, awaiting_user_id, start_user_id, start_comment
     duration = None
     if event_type and event_start_time:
         duration = time.time() - event_start_time
         logger.info(f"Event {event_type} ended for {TEAM_NAME}. Duration: {duration:.2f} seconds")
         print(f"Event {event_type} ended. Duration: {duration:.2f} seconds")
-        # Use the end_comment parameter directly without modifying the global until after the call
-        send_event_async(f"reset_{event_type}", duration, start_user_id, end_user_id, start_comment, end_comment)
+        send_event_async(f"reset_{event_type}", duration, start_user_id, end_user_id, start_comment, end_comment, cancel_reason)
     
     GPIO.output(LED_DOWNTIME, GPIO.LOW)
     GPIO.output(LED_MAINTENANCE, GPIO.LOW)
     GPIO.output(LED_EMERGENCY, GPIO.LOW)
     GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+    GPIO.output(LED_CANCEL, GPIO.LOW)
     last_sensor_trigger = time.time()
     downtime_triggered = False
     selected_led = None
     event_start_time = None
     start_user_id = None
     start_comment = None
-    globals()['end_comment'] = None  # Reset global end_comment here
+    globals()['end_comment'] = None
     is_first_run = True
     awaiting_user_id = False
     logger.info("System reset")
@@ -171,6 +177,16 @@ def get_comment_from_input(prompt="Enter Comment (or press Enter to skip): "):
     logger.info(f"User entered comment: {comment}")
     return comment if comment else ""
 
+def get_cancel_reason_from_input():
+    while True:
+        display_lcd_simulation("Enter Reason for Cancellation (required): ")
+        reason = input("Cancel Reason: ").strip()
+        if reason:
+            logger.info(f"User entered cancel reason: {reason}")
+            return reason
+        else:
+            print("Cancel reason cannot be empty. Please provide a reason.")
+
 def monitor_buttons_and_downtime():
     global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, awaiting_user_id, start_user_id, start_comment, end_comment
     
@@ -178,6 +194,7 @@ def monitor_buttons_and_downtime():
     prev_downtime = GPIO.HIGH
     prev_maintenance = GPIO.HIGH
     prev_emergency = GPIO.HIGH
+    prev_cancel = GPIO.HIGH
     
     flash_state = False
     last_flash_time = time.time()
@@ -188,6 +205,7 @@ def monitor_buttons_and_downtime():
             curr_downtime = GPIO.input(BUTTON_DOWNTIME)
             curr_maintenance = GPIO.input(BUTTON_MAINTENANCE)
             curr_emergency = GPIO.input(BUTTON_EMERGENCY)
+            curr_cancel = GPIO.input(BUTTON_CANCEL)
             
             if prev_sensor == GPIO.HIGH and curr_sensor == GPIO.LOW and is_first_run:
                 logger.info(f"Sensor triggered on GPIO {SENSOR_OBSTACLE} for {TEAM_NAME}")
@@ -203,6 +221,7 @@ def monitor_buttons_and_downtime():
                 GPIO.output(LED_MAINTENANCE, GPIO.HIGH)
                 GPIO.output(LED_EMERGENCY, GPIO.HIGH)
                 GPIO.output(LED_DOWNTIME_ALERT, GPIO.HIGH)
+                GPIO.output(LED_CANCEL, GPIO.HIGH)
                 downtime_triggered = True
                 is_first_run = False
             
@@ -219,6 +238,7 @@ def monitor_buttons_and_downtime():
                         GPIO.output(LED_MAINTENANCE, GPIO.LOW)
                         GPIO.output(LED_EMERGENCY, GPIO.LOW)
                         GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+                        GPIO.output(LED_CANCEL, GPIO.LOW)
                         selected_led = LED_DOWNTIME
                         downtime_triggered = False
                         event_start_time = time.time()
@@ -240,6 +260,7 @@ def monitor_buttons_and_downtime():
                         GPIO.output(LED_DOWNTIME, GPIO.LOW)
                         GPIO.output(LED_EMERGENCY, GPIO.LOW)
                         GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+                        GPIO.output(LED_CANCEL, GPIO.LOW)
                         selected_led = LED_MAINTENANCE
                         downtime_triggered = False
                         event_start_time = time.time()
@@ -261,6 +282,7 @@ def monitor_buttons_and_downtime():
                         GPIO.output(LED_DOWNTIME, GPIO.LOW)
                         GPIO.output(LED_MAINTENANCE, GPIO.LOW)
                         GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+                        GPIO.output(LED_CANCEL, GPIO.LOW)
                         selected_led = LED_EMERGENCY
                         downtime_triggered = False
                         event_start_time = time.time()
@@ -269,6 +291,17 @@ def monitor_buttons_and_downtime():
                         start_comment = get_comment_from_input("Enter Start Comment (or press Enter to skip): ")
                         send_event_async("emergency", start_user_id=start_user_id, start_comment=start_comment)
                         awaiting_user_id = False
+                
+                elif prev_cancel == GPIO.HIGH and curr_cancel == GPIO.LOW and selected_led:
+                    logger.info(f"Cancel button PRESSED on GPIO {BUTTON_CANCEL} for {TEAM_NAME}")
+                    print(f"Cancel button PRESSED on GPIO {BUTTON_CANCEL}")
+                    awaiting_user_id = True
+                    cancel_reason = get_cancel_reason_from_input()
+                    GPIO.output(LED_CANCEL, GPIO.HIGH)  # Turn on cancel LED briefly
+                    time.sleep(0.5)
+                    GPIO.output(LED_CANCEL, GPIO.LOW)
+                    reset_system(selected_led_to_event_type(selected_led), cancel_reason=cancel_reason)
+                    awaiting_user_id = False
             
             if selected_led and not awaiting_user_id:
                 if time.time() - last_flash_time >= 0.25:
@@ -280,6 +313,7 @@ def monitor_buttons_and_downtime():
             prev_downtime = curr_downtime
             prev_maintenance = curr_maintenance
             prev_emergency = curr_emergency
+            prev_cancel = curr_cancel
             
             time.sleep(0.01)
         except Exception as e:
