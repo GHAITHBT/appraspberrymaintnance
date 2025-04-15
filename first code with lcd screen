@@ -6,7 +6,7 @@ import requests
 import socket
 from threading import Thread
 import json
-from RPLCD.i2c import CharLCD  # Import RPLCD for I2C LCD
+from RPLCD.i2c import CharLCD  # Continue using RPLCD
 
 # Setup logging
 logging.basicConfig(
@@ -46,23 +46,29 @@ end_comment = None
 sensor_alert_active = False  # Flag for sensor alert during an event
 
 # Initialize I2C LCD (20x4)
-try:
-    lcd = CharLCD(
-        i2c_expander='PCF8574',
-        address=0x27,  # Replace with your LCD's I2C address (e.g., 0x3F if 0x27 doesn't work)
-        port=1,
-        cols=20,
-        rows=4,
-        dotsize=8,
-        auto_linebreaks=True
-    )
-    lcd.clear()
-    lcd.write('Initializing...')
-    logger.info("LCD initialized successfully")
-except Exception as e:
-    lcd = None
-    logger.error(f"Failed to initialize LCD: {e}")
-    print(f"Warning: LCD initialization failed: {e}. Falling back to console output.")
+lcd = None
+for attempt in range(3):
+    try:
+        lcd = CharLCD(
+            i2c_expander='PCF8574',
+            address=0x27,
+            port=1,
+            cols=20,
+            rows=4,
+            dotsize=8,
+            auto_linebreaks=False  # Manual control, as in test script
+        )
+        lcd.clear()
+        lcd.cursor_pos = (0, 0)
+        lcd.write_string("Initializing...")
+        logger.info(f"LCD initialized successfully on attempt {attempt + 1}")
+        break
+    except Exception as e:
+        logger.error(f"LCD init attempt {attempt + 1} failed: {e}")
+        time.sleep(1)
+if not lcd:
+    logger.error("Failed to initialize LCD after 3 attempts. Using console output.")
+    print("Warning: LCD initialization failed. Falling back to console output.")
 
 def get_ip_address():
     try:
@@ -183,8 +189,17 @@ def reset_system(event_type=None, end_user_id=None, end_comment=None, cancel_rea
     logger.info("System reset")
     print("System reset")
     if lcd:
-        lcd.clear()
-        lcd.write(f"System Reset\nMachine: {TEAM_NAME or 'Unknown'}\nReady for operation")
+        try:
+            lcd.clear()
+            lcd.cursor_pos = (0, 0)
+            lcd.write_string("System Reset")
+            lcd.cursor_pos = (1, 0)
+            lcd.write_string(f"Machine: {TEAM_NAME or 'Unknown'}"[:20])
+            lcd.cursor_pos = (2, 0)
+            lcd.write_string("Ready for operation")
+        except Exception as e:
+            logger.error(f"LCD write error in reset_system: {e}")
+            print(f"Warning: LCD write failed: {e}")
     else:
         print("\n====================\nLCD: System Reset\n====================\n")
 
@@ -193,7 +208,7 @@ def display_lcd_message(message):
     if lcd:
         try:
             lcd.clear()
-            # Split message into words and wrap to 20 chars per line
+            # Split message into lines
             words = message.split()
             lines = []
             current_line = ""
@@ -209,7 +224,7 @@ def display_lcd_message(message):
             # Write up to 4 lines
             for i, line in enumerate(lines[:4]):
                 lcd.cursor_pos = (i, 0)
-                lcd.write(line.ljust(20)[:20])  # Pad or truncate to 20 chars
+                lcd.write_string(line[:20])  # Truncate to 20 chars
             logger.info(f"LCD displayed: {message}")
         except Exception as e:
             logger.error(f"LCD write error: {e}")
@@ -224,7 +239,10 @@ def get_user_id_from_input(prompt="Enter User ID: "):
     user_id = input("User ID: ").strip()
     logger.info(f"User entered ID: {user_id}")
     if lcd:
-        lcd.clear()
+        try:
+            lcd.clear()
+        except Exception as e:
+            logger.error(f"LCD clear error in get_user_id: {e}")
     return user_id if user_id else "N/A"
 
 def get_comment_from_input(prompt="Enter Comment (or press Enter to skip): "):
@@ -232,7 +250,10 @@ def get_comment_from_input(prompt="Enter Comment (or press Enter to skip): "):
     comment = input("Comment: ").strip()
     logger.info(f"User entered comment: {comment}")
     if lcd:
-        lcd.clear()
+        try:
+            lcd.clear()
+        except Exception as e:
+            logger.error(f"LCD clear error in get_comment: {e}")
     return comment if comment else ""
 
 def get_cancel_reason_from_input():
@@ -242,7 +263,10 @@ def get_cancel_reason_from_input():
         if reason:
             logger.info(f"User entered cancel reason: {reason}")
             if lcd:
-                lcd.clear()
+                try:
+                    lcd.clear()
+                except Exception as e:
+                    logger.error(f"LCD clear error in get_cancel_reason: {e}")
             return reason
         else:
             print("Cancel reason cannot be empty. Please provide a reason.")
@@ -441,8 +465,15 @@ def main():
         
         # Display initial message on LCD
         if lcd:
-            lcd.clear()
-            lcd.write(f"Machine: {TEAM_NAME}\nReady for operation")
+            try:
+                lcd.clear()
+                lcd.cursor_pos = (0, 0)
+                lcd.write_string(f"Machine: {TEAM_NAME}"[:20])
+                lcd.cursor_pos = (1, 0)
+                lcd.write_string("Ready for operation")
+            except Exception as e:
+                logger.error(f"LCD write error in main: {e}")
+                print(f"Warning: LCD write failed: {e}")
         else:
             print("\n====================\nLCD: System Ready\n====================\n")
         
@@ -460,8 +491,11 @@ def main():
         print(f"Error in main: {e}")
     finally:
         if lcd:
-            lcd.clear()
-            lcd.backlight_enabled = False
+            try:
+                lcd.clear()
+                lcd.backlight_enabled = False  # Turn off backlight on exit
+            except Exception as e:
+                logger.error(f"LCD cleanup error: {e}")
         GPIO.cleanup()
         logger.info("GPIO and LCD cleaned up")
         print("GPIO and LCD cleaned up")
