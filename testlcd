@@ -1,0 +1,36 @@
+from RPLCD.i2c import CharLCD
+import time
+
+print("Starting LCD test...")
+lcd = None
+for attempt in range(3):
+    try:
+        lcd = CharLCD(
+            i2c_expander='PCF8574',
+            address=0x27,
+            port=1,
+            cols=20,
+            rows=4,
+            dotsize=8,
+            auto_linebreaks=True
+        )
+        print(f"LCD initialized on attempt {attempt + 1}")
+        break
+    except Exception as e:
+        print(f"Attempt {attempt + 1} failed: {e}")
+        time.sleep(1)
+
+if lcd:
+    try:
+        lcd.clear()
+        lcd.write('Test LCD 20x4\nLine 2: Hello\nLine 3: Address 0x27\nLine 4: Working!')
+        print("Text sent to LCD")
+        time.sleep(10)  # Give time to adjust contrast
+        lcd.clear()
+        lcd.write('Test Complete')
+        time.sleep(2)
+        lcd.clear()
+    except Exception as e:
+        print(f"LCD write error: {e}")
+else:
+    print("Failed to initialize LCD after 3 attempts")
