@@ -12,7 +12,7 @@ for attempt in range(3):
             cols=20,
             rows=4,
             dotsize=8,
-            auto_linebreaks=True
+            auto_linebreaks=False  # Disable to manual control
         )
         print(f"LCD initialized on attempt {attempt + 1}")
         break
@@ -23,11 +23,20 @@ for attempt in range(3):
 if lcd:
     try:
         lcd.clear()
-        lcd.write('Test LCD 20x4\nLine 2: Hello\nLine 3: Address 0x27\nLine 4: Working!')
+        # Write line by line to avoid write() bug
+        lcd.cursor_pos = (0, 0)
+        lcd.write_string("Test LCD 20x4")
+        lcd.cursor_pos = (1, 0)
+        lcd.write_string("Line 2: Hello")
+        lcd.cursor_pos = (2, 0)
+        lcd.write_string("Line 3: Address 0x27")
+        lcd.cursor_pos = (3, 0)
+        lcd.write_string("Line 4: Working!")
         print("Text sent to LCD")
-        time.sleep(10)  # Give time to adjust contrast
+        time.sleep(10)  # Time to adjust contrast
         lcd.clear()
-        lcd.write('Test Complete')
+        lcd.cursor_pos = (0, 0)
+        lcd.write_string("Test Complete")
         time.sleep(2)
         lcd.clear()
     except Exception as e:
