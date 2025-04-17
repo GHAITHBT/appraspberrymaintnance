@@ -12,6 +12,7 @@ from mysql.connector import Error
 import sys
 import tty
 import termios
+import traceback
 
 # Setup logging
 logging.basicConfig(
@@ -34,8 +35,8 @@ BUTTON_EMERGENCY = 6
 BUTTON_CANCEL = 13
 SENSOR_OBSTACLE = 4
 
-# Power cut signal GPIO (optional, for relay control)
-POWER_CUT_RELAY = 18  # Adjust as per your hardware setup
+# Power cut signal GPIO (relay control)
+POWER_CUT_RELAY = 14  # Changed to GPIO 14 for power cut relay
 
 # Main Flask app API base URL
 MAIN_API_BASE_URL = "http://10.110.3.102:1250/api"  # Ensure this matches Flask server
@@ -96,11 +97,12 @@ def get_ip_address():
         logger.info(f"Retrieved IP address: {ip_address}")
         return ip_address
     except Exception as e:
-        logger.error(f"Error getting IP address: {e}")
+        logger.error(f"Error getting IP address: {e}\n{traceback.format_exc()}")
         return None
 
 def fetch_machine_name_from_db(ip_address):
     try:
+        logger.info(f"Attempting to connect to MySQL at {DB_CONFIG['host']} for database {DB_CONFIG['database']}")
         connection = mysql.connector.connect(**DB_CONFIG)
         cursor = connection.cursor(dictionary=True)
         query = """
@@ -108,6 +110,7 @@ def fetch_machine_name_from_db(ip_address):
         FROM raspberry_machines 
         WHERE ip_address = %s
         """
+        logger.info(f"Executing query: {query} with IP: {ip_address}")
         cursor.execute(query, (ip_address,))
         result = cursor.fetchone()
         if result:
@@ -118,13 +121,17 @@ def fetch_machine_name_from_db(ip_address):
             logger.warning(f"No machine name found for IP: {ip_address} in database")
             return None
     except Error as e:
-        logger.error(f"Database error fetching machine name for IP {ip_address}: {e}")
+        logger.error(f"Database error fetching machine name for IP {ip_address}: {e}\n{traceback.format_exc()}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error fetching machine name for IP {ip_address}: {e}\n{traceback.format_exc()}")
         return None
     finally:
         if 'cursor' in locals():
             cursor.close()
         if 'connection' in locals() and connection.is_connected():
             connection.close()
+            logger.info("MySQL connection closed")
 
 def test_api_connectivity():
     """Test connectivity to the Flask API on startup."""
@@ -132,17 +139,34 @@ def test_api_connectivity():
         url = f"{MAIN_API_BASE_URL}/test_connectivity"
         data = {"source": "RaspberryPi", "ip": get_ip_address(), "timestamp": time.time()}
         headers = {'Content-Type': 'application/json'}
-        logger.info(f"Testing API connectivity to {url} with data: {json.dumps(data)}")
+        logger.info(f"Testing API connectivity to {url} with data: {json.dumps(data)} and headers: {headers}")
         response = requests.post(url, json=data, headers=headers, timeout=5)
+        logger.info(f"API response status: {response.status_code}, content: {response.text}")
         if response.status_code == 200:
             logger.info(f"API connectivity test successful: {response.text}")
             print(f"API connectivity test successful: {response.text}")
         else:
             logger.warning(f"API connectivity test failed: Status {response.status_code} - {response.text}")
             print(f"API connectivity test failed: Status {response.status_code} - {response.text}")
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"API connectivity test failed due to connection error: {e}\n{traceback.format_exc()}")
+        print(f"API connectivity test failed due to connection error: {e}")
+    except requests.exceptions.Timeout as e:
+        logger.error(f"API connectivity test failed due to timeout: {e}\n{traceback.format_exc()}")
+        print(f"API connectivity test failed due to timeout: {e}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API connectivity test failed due to request error: {e}\n{traceback.format_exc()}")
+        print(f"API connectivity test failed due to request error: {e}")
     except Exception as e:
-        logger.error(f"API connectivity test error: {e}")
-        print(f"API connectivity test error: {e}")
+        logger.error(f"Unexpected error in API connectivity test: {e}\n{traceback.format_exc()}")
+        print(f"Unexpected error in API connectivity test: {e}")
+
+def periodic_api_test():
+    """Periodically test API connectivity every 60 seconds."""
+    while True:
+        logger.info("Starting periodic API connectivity test")
+        test_api_connectivity()
+        time.sleep(60)
 
 def setup_gpio():
     try:
@@ -154,7 +178,7 @@ def setup_gpio():
         GPIO.setup(LED_EMERGENCY, GPIO.OUT)
         GPIO.setup(LED_DOWNTIME_ALERT, GPIO.OUT)
         GPIO.setup(LED_CANCEL, GPIO.OUT)
-        GPIO.setup(POWER_CUT_RELAY, GPIO.OUT)  # Setup power cut relay pin
+        GPIO.setup(POWER_CUT_RELAY, GPIO.OUT)  # Setup power cut relay pin (GPIO 14)
         
         GPIO.setup(BUTTON_DOWNTIME, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(BUTTON_MAINTENANCE, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -168,17 +192,18 @@ def setup_gpio():
         GPIO.output(LED_EMERGENCY, GPIO.HIGH)
         GPIO.output(LED_DOWNTIME_ALERT, GPIO.HIGH)
         GPIO.output(LED_CANCEL, GPIO.HIGH)
-        GPIO.output(POWER_CUT_RELAY, GPIO.LOW)  # Ensure power cut relay is off
+        GPIO.output(POWER_CUT_RELAY, GPIO.LOW)  # Ensure power cut relay is off initially
         time.sleep(2)
         GPIO.output(LED_DOWNTIME, GPIO.LOW)
         GPIO.output(LED_MAINTENANCE, GPIO.LOW)
         GPIO.output(LED_EMERGENCY, GPIO.LOW)
         GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
         GPIO.output(LED_CANCEL, GPIO.LOW)
+        GPIO.output(POWER_CUT_RELAY, GPIO.LOW)
         
         logger.info("GPIO setup completed successfully")
     except Exception as e:
-        logger.error(f"GPIO setup error: {e}")
+        logger.error(f"GPIO setup error: {e}\n{traceback.format_exc()}")
         print(f"GPIO setup error: {e}")
 
 def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=None, start_comment=None, end_comment=None, cancel_reason=None):
@@ -202,15 +227,22 @@ def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=
                     "cancel_reason": cancel_reason if cancel_reason else ""
                 }
                 headers = {'Content-Type': 'application/json'}
-                logger.info(f"Attempt {attempt + 1}/{max_retries}: Sending event to {url} - Details: {json.dumps(data)}")
+                logger.info(f"Attempt {attempt + 1}/{max_retries}: Sending event to {url} - Data: {json.dumps(data)} - Headers: {headers}")
                 response = requests.post(url, json=data, headers=headers, timeout=5)
+                logger.info(f"Response received: Status {response.status_code} - Content: {response.text}")
                 if response.status_code == 200:
                     logger.info(f"Event sent successfully: {event_type} for {TEAM_NAME} - Response: {response.text}")
                     return
                 else:
                     logger.warning(f"Attempt {attempt + 1}/{max_retries}: Failed to send event: {event_type} - Status: {response.status_code} - Response: {response.text}")
+            except requests.exceptions.ConnectionError as e:
+                logger.error(f"Attempt {attempt + 1}/{max_retries}: Connection error sending {event_type} event to {url}: {e}\n{traceback.format_exc()}")
+            except requests.exceptions.Timeout as e:
+                logger.error(f"Attempt {attempt + 1}/{max_retries}: Timeout error sending {event_type} event to {url}: {e}\n{traceback.format_exc()}")
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Attempt {attempt + 1}/{max_retries}: Request error sending {event_type} event to {url}: {e}\n{traceback.format_exc()}")
             except Exception as e:
-                logger.error(f"Attempt {attempt + 1}/{max_retries}: Error sending {event_type} event to {url}: {e} - Data: {json.dumps(data)}")
+                logger.error(f"Attempt {attempt + 1}/{max_retries}: Unexpected error sending {event_type} event to {url}: {e}\n{traceback.format_exc()}")
             if attempt < max_retries - 1:
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
@@ -219,7 +251,7 @@ def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=
     Thread(target=send_request, daemon=True).start()
 
 def reset_system(event_type=None, end_user_id=None, end_comment=None, cancel_reason=None):
-    global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, awaiting_user_id, start_user_id, start_comment, sensor_alert_active
+    global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, awaiting_user_id, start_user_id, start_comment, sensor_alert_active, power_cut_active
     duration = None
     if event_type and event_start_time:
         duration = time.time() - event_start_time
@@ -233,6 +265,7 @@ def reset_system(event_type=None, end_user_id=None, end_comment=None, cancel_rea
     GPIO.output(LED_EMERGENCY, GPIO.LOW)
     GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
     GPIO.output(LED_CANCEL, GPIO.LOW)
+    GPIO.output(POWER_CUT_RELAY, GPIO.LOW)  # Turn off relay on reset
     last_sensor_trigger = time.time()
     downtime_triggered = False
     selected_led = None
@@ -243,8 +276,9 @@ def reset_system(event_type=None, end_user_id=None, end_comment=None, cancel_rea
     is_first_run = True
     awaiting_user_id = False
     sensor_alert_active = False
-    logger.info("System reset")
-    print("System reset")
+    power_cut_active = False
+    logger.info("System reset, power cut relay turned off")
+    print("System reset, power cut relay turned off")
     if lcd:
         try:
             lcd.clear()
@@ -255,7 +289,7 @@ def reset_system(event_type=None, end_user_id=None, end_comment=None, cancel_rea
             lcd.cursor_pos = (2, 0)
             lcd.write_string("Ready for operation")
         except Exception as e:
-            logger.error(f"LCD write error in reset_system: {e}")
+            logger.error(f"LCD write error in reset_system: {e}\n{traceback.format_exc()}")
             print(f"Warning: LCD write failed: {e}")
     else:
         print("\n====================\nLCD: System Reset\n====================\n")
@@ -282,7 +316,7 @@ def display_lcd_message(message):
                 lcd.write_string(line[:20])
             logger.info(f"LCD displayed: {message}")
         except Exception as e:
-            logger.error(f"LCD write error: {e}")
+            logger.error(f"LCD write error: {e}\n{traceback.format_exc()}")
             print(f"Warning: Failed to write to LCD: {e}. Message: {message}")
     print("\n" + "="*20)
     print(f"LCD: {message}")
@@ -313,7 +347,7 @@ def get_input_with_lcd(prompt):
                     lcd.cursor_pos = (1, 0)
                     lcd.write_string(input_str[:20])
                 except Exception as e:
-                    logger.error(f"LCD write error in get_input: {e}")
+                    logger.error(f"LCD write error in get_input: {e}\n{traceback.format_exc()}")
             print(f"\rInput: {input_str}", end="")
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -329,7 +363,7 @@ def get_user_id_from_input(prompt="Enter User ID: "):
             lcd.cursor_pos = (0, 0)
             lcd.write_string("User ID Entered")
         except Exception as e:
-            logger.error(f"LCD clear error in get_user_id: {e}")
+            logger.error(f"LCD clear error in get_user_id: {e}\n{traceback.format_exc()}")
     return user_id if user_id else "N/A"
 
 def get_comment_from_input(prompt="Enter Comment (or press Enter to skip): "):
@@ -340,7 +374,7 @@ def get_comment_from_input(prompt="Enter Comment (or press Enter to skip): "):
             lcd.cursor_pos = (0, 0)
             lcd.write_string("Comment Entered")
         except Exception as e:
-            logger.error(f"LCD clear error in get_comment: {e}")
+            logger.error(f"LCD clear error in get_comment: {e}\n{traceback.format_exc()}")
     return comment if comment else ""
 
 def get_cancel_reason_from_input():
@@ -354,7 +388,7 @@ def get_cancel_reason_from_input():
                     lcd.cursor_pos = (0, 0)
                     lcd.write_string("Reason Entered")
                 except Exception as e:
-                    logger.error(f"LCD clear error in get_cancel_reason: {e}")
+                    logger.error(f"LCD clear error in get_cancel_reason: {e}\n{traceback.format_exc()}")
             return reason
         else:
             print("Cancel reason cannot be empty. Please provide a reason.")
@@ -364,10 +398,10 @@ def handle_power_cut():
     """Handle power cut signal received from Flask app."""
     global power_cut_active
     power_cut_active = True
-    GPIO.output(POWER_CUT_RELAY, GPIO.HIGH)  # Activate relay (adjust logic as needed)
+    GPIO.output(POWER_CUT_RELAY, GPIO.HIGH)  # Activate relay (HIGH signal to cut power)
     display_lcd_message("Power Cut!\nMaintenance Overdue")
-    logger.info("Power cut signal received and activated")
-    print("Power cut signal received and activated")
+    logger.info("Power cut signal received, relay (GPIO 14) set to HIGH")
+    print("Power cut signal received, relay (GPIO 14) set to HIGH")
 
 def monitor_buttons_and_downtime():
     global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, awaiting_user_id, start_user_id, start_comment, end_comment, sensor_alert_active
@@ -525,7 +559,7 @@ def monitor_buttons_and_downtime():
             
             time.sleep(0.01)
         except Exception as e:
-            logger.error(f"Error in monitor_buttons_and_downtime: {e}")
+            logger.error(f"Error in monitor_buttons_and_downtime: {e}\n{traceback.format_exc()}")
             print(f"Error in monitor_buttons_and_downtime: {e}")
 
 def selected_led_to_event_type(led):
@@ -543,28 +577,54 @@ def run_power_cut_server():
     
     class PowerCutHandler(BaseHTTPRequestHandler):
         def do_POST(self):
-            if self.path == '/power_cut':
-                content_length = int(self.headers['Content-Length'])
-                post_data = self.rfile.read(content_length)
-                data = json.loads(post_data.decode('utf-8'))
-                machine_name = data.get('machine_name')
-                if machine_name == TEAM_NAME:
-                    handle_power_cut()
-                    self.send_response(200)
+            try:
+                if self.path == '/power_cut':
+                    content_length = int(self.headers['Content-Length'])
+                    post_data = self.rfile.read(content_length)
+                    try:
+                        data = json.loads(post_data.decode('utf-8'))
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Invalid JSON in power cut request: {e}\nData: {post_data}")
+                        self.send_response(400)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
+                        return
+                    machine_name = data.get('machine_name')
+                    logger.info(f"Received power cut request: {data}")
+                    if machine_name == TEAM_NAME:
+                        handle_power_cut()
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
+                        logger.info("Power cut request processed successfully")
+                    else:
+                        logger.warning(f"Power cut request rejected: Invalid machine name {machine_name}")
+                        self.send_response(400)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"error": "Invalid machine name"}).encode('utf-8'))
+                else:
+                    logger.warning(f"Invalid power cut request path: {self.path}")
+                    self.send_response(404)
                     self.send_header('Content-type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
-                else:
-                    self.send_response(400)
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"error": "Invalid machine name"}).encode('utf-8'))
-            else:
-                self.send_response(404)
+                    self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+            except Exception as e:
+                logger.error(f"Error processing power cut request: {e}\n{traceback.format_exc()}")
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
                 self.end_headers()
+                self.wfile.write(json.dumps({"error": "Server error"}).encode('utf-8'))
     
-    server = HTTPServer(('0.0.0.0', 8000), PowerCutHandler)
-    logger.info("Starting power cut server on port 8000")
-    server.serve_forever()
+    try:
+        server = HTTPServer(('0.0.0.0', 8000), PowerCutHandler)
+        logger.info("Starting power cut server on port 8000")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Power cut server failed to start: {e}\n{traceback.format_exc()}")
+        print(f"Power cut server failed to start: {e}")
 
 def main():
     global TEAM_NAME
@@ -573,6 +633,7 @@ def main():
         logger.info("Initial GPIO cleanup completed")
         
         ip_address = get_ip_address()
+        logger.info(f"Local IP address: {ip_address}")
         if ip_address:
             TEAM_NAME = fetch_machine_name_from_db(ip_address)
         if not TEAM_NAME:
@@ -581,6 +642,10 @@ def main():
         
         # Test API connectivity
         test_api_connectivity()
+        
+        # Start periodic API test in a separate thread
+        api_test_thread = threading.Thread(target=periodic_api_test, daemon=True)
+        api_test_thread.start()
         
         setup_gpio()
         time.sleep(0.1)
@@ -597,7 +662,7 @@ def main():
                 lcd.cursor_pos = (1, 0)
                 lcd.write_string("Ready for operation")
             except Exception as e:
-                logger.error(f"LCD write error in main: {e}")
+                logger.error(f"LCD write error in main: {e}\n{traceback.format_exc()}")
                 print(f"Warning: LCD write failed: {e}")
         else:
             print("\n====================\nLCD: System Ready\n====================\n")
@@ -612,7 +677,7 @@ def main():
         while True:
             time.sleep(1)
     except Exception as e:
-        logger.error(f"Error in main: {e}")
+        logger.error(f"Error in main: {e}\n{traceback.format_exc()}")
         print(f"Error in main: {e}")
     finally:
         if lcd:
@@ -620,7 +685,7 @@ def main():
                 lcd.clear()
                 lcd.backlight_enabled = False
             except Exception as e:
-                logger.error(f"LCD cleanup error: {e}")
+                logger.error(f"LCD cleanup error: {e}\n{traceback.format_exc()}")
         GPIO.cleanup()
         logger.info("GPIO and LCD cleaned up")
         print("GPIO and LCD cleaned up")
