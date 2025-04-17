@@ -9,6 +9,9 @@ import json
 from RPLCD.i2c import CharLCD
 import mysql.connector
 from mysql.connector import Error
+import sys
+import tty
+import termios
 
 # Setup logging
 logging.basicConfig(
@@ -31,15 +34,18 @@ BUTTON_EMERGENCY = 6
 BUTTON_CANCEL = 13
 SENSOR_OBSTACLE = 4
 
+# Power cut signal GPIO (optional, for relay control)
+POWER_CUT_RELAY = 18  # Adjust as per your hardware setup
+
 # Main Flask app API base URL
-MAIN_API_BASE_URL = "http://10.110.30.15:1250/api"
+MAIN_API_BASE_URL = "http://10.110.3.102:1250/api"  # Updated to match Flask app host
 
 # MySQL Database Configuration
 DB_CONFIG = {
-    'host': 'localhost',  # Update with your MySQL host
+    'host': '10.110.3.102',
     'database': 'esp32_data',
-    'user': 'your_username',  # Update with your MySQL username
-    'password': 'your_password'  # Update with your MySQL password
+    'user': 'root',
+    'password': 'Passw0rd123'
 }
 
 # Global state
@@ -54,6 +60,7 @@ start_user_id = None
 start_comment = None
 end_comment = None
 sensor_alert_active = False
+power_cut_active = False
 
 # Initialize I2C LCD (20x4)
 lcd = None
@@ -129,6 +136,7 @@ def setup_gpio():
         GPIO.setup(LED_EMERGENCY, GPIO.OUT)
         GPIO.setup(LED_DOWNTIME_ALERT, GPIO.OUT)
         GPIO.setup(LED_CANCEL, GPIO.OUT)
+        GPIO.setup(POWER_CUT_RELAY, GPIO.OUT)  # Setup power cut relay pin
         
         GPIO.setup(BUTTON_DOWNTIME, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(BUTTON_MAINTENANCE, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -142,6 +150,7 @@ def setup_gpio():
         GPIO.output(LED_EMERGENCY, GPIO.HIGH)
         GPIO.output(LED_DOWNTIME_ALERT, GPIO.HIGH)
         GPIO.output(LED_CANCEL, GPIO.HIGH)
+        GPIO.output(POWER_CUT_RELAY, GPIO.LOW)  # Ensure power cut relay is off
         time.sleep(2)
         GPIO.output(LED_DOWNTIME, GPIO.LOW)
         GPIO.output(LED_MAINTENANCE, GPIO.LOW)
@@ -171,8 +180,9 @@ def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=
                 "end_comment": end_comment if end_comment else "",
                 "cancel_reason": cancel_reason if cancel_reason else ""
             }
+            headers = {'Content-Type': 'application/json'}
             logger.info(f"Sending event to {url} - Details: {json.dumps(data)}")
-            response = requests.post(url, json=data, timeout=5)
+            response = requests.post(url, json=data, headers=headers, timeout=5)
             if response.status_code == 200:
                 logger.info(f"Event sent successfully: {event_type} for {TEAM_NAME} - Response: {response.text}")
             else:
@@ -229,7 +239,6 @@ def display_lcd_message(message):
     if lcd:
         try:
             lcd.clear()
-            # Split message into lines
             words = message.split()
             lines = []
             current_line = ""
@@ -242,7 +251,6 @@ def display_lcd_message(message):
             if current_line:
                 lines.append(current_line.strip())
             
-            # Write up to 4 lines
             for i, line in enumerate(lines[:4]):
                 lcd.cursor_pos = (i, 0)
                 lcd.write_string(line[:20])
@@ -250,15 +258,45 @@ def display_lcd_message(message):
         except Exception as e:
             logger.error(f"LCD write error: {e}")
             print(f"Warning: Failed to write to LCD: {e}. Message: {message}")
-    # Fallback to console
     print("\n" + "="*20)
     print(f"LCD: {message}")
     print("="*20 + "\n")
 
-def get_user_id_from_input(prompt="Enter User ID: "):
+def get_input_with_lcd(prompt):
+    """Get input from keyboard and display it on LCD in real-time."""
     display_lcd_message(prompt)
-    user_id = input("User ID: ").strip()
-    logger.info(f"User entered ID: {user_id}")
+    input_str = ""
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        while True:
+            char = sys.stdin.read(1)
+            if char == '\r' or char == '\n':  # Enter key
+                break
+            elif char == '\x7f':  # Backspace
+                input_str = input_str[:-1]
+            elif char.isprintable():
+                input_str += char
+            # Update LCD with current input
+            if lcd:
+                try:
+                    lcd.clear()
+                    lcd.cursor_pos = (0, 0)
+                    lcd.write_string(prompt[:20])
+                    lcd.cursor_pos = (1, 0)
+                    lcd.write_string(input_str[:20])
+                except Exception as e:
+                    logger.error(f"LCD write error in get_input: {e}")
+            print(f"\rInput: {input_str}", end="")
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        print()  # New line after input
+    logger.info(f"User entered: {input_str}")
+    return input_str.strip()
+
+def get_user_id_from_input(prompt="Enter User ID: "):
+    user_id = get_input_with_lcd(prompt)
     if lcd:
         try:
             lcd.clear()
@@ -269,9 +307,7 @@ def get_user_id_from_input(prompt="Enter User ID: "):
     return user_id if user_id else "N/A"
 
 def get_comment_from_input(prompt="Enter Comment (or press Enter to skip): "):
-    display_lcd_message(prompt)
-    comment = input("Comment: ").strip()
-    logger.info(f"User entered comment: {comment}")
+    comment = get_input_with_lcd(prompt)
     if lcd:
         try:
             lcd.clear()
@@ -283,8 +319,7 @@ def get_comment_from_input(prompt="Enter Comment (or press Enter to skip): "):
 
 def get_cancel_reason_from_input():
     while True:
-        display_lcd_message("Enter Cancel Reason\n(required):")
-        reason = input("Cancel Reason: ").strip()
+        reason = get_input_with_lcd("Enter Cancel Reason\n(required):")
         if reason:
             logger.info(f"User entered cancel reason: {reason}")
             if lcd:
@@ -298,6 +333,15 @@ def get_cancel_reason_from_input():
         else:
             print("Cancel reason cannot be empty. Please provide a reason.")
             display_lcd_message("Reason cannot be\nempty. Try again:")
+
+def handle_power_cut():
+    """Handle power cut signal received from Flask app."""
+    global power_cut_active
+    power_cut_active = True
+    GPIO.output(POWER_CUT_RELAY, GPIO.HIGH)  # Activate relay (adjust logic as needed)
+    display_lcd_message("Power Cut!\nMaintenance Overdue")
+    logger.info("Power cut signal received and activated")
+    print("Power cut signal received and activated")
 
 def monitor_buttons_and_downtime():
     global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, awaiting_user_id, start_user_id, start_comment, end_comment, sensor_alert_active
@@ -326,7 +370,7 @@ def monitor_buttons_and_downtime():
                 if downtime_triggered or selected_led:
                     reset_system(selected_led_to_event_type(selected_led))
             
-            if time.time() - last_sensor_trigger > 5 and not downtime_triggered and not selected_led:
+            if time.time() - last_sensor_trigger > 5 and not downtime_triggered and not selected_led and not power_cut_active:
                 logger.info(f"5 seconds passed without sensor trigger for {TEAM_NAME} - Turning on all LEDs")
                 print("5 seconds passed without sensor trigger - Turning on all LEDs")
                 GPIO.output(LED_DOWNTIME, GPIO.HIGH)
@@ -365,7 +409,7 @@ def monitor_buttons_and_downtime():
                 elif selected_led and not awaiting_user_id:
                     GPIO.output(selected_led, GPIO.HIGH if flash_state else GPIO.LOW)
             
-            if not awaiting_user_id:
+            if not awaiting_user_id and not power_cut_active:
                 if prev_downtime == GPIO.HIGH and curr_downtime == GPIO.LOW:
                     logger.info(f"Downtime button PRESSED on GPIO {BUTTON_DOWNTIME} for {TEAM_NAME}")
                     print(f"Downtime button PRESSED on GPIO {BUTTON_DOWNTIME}")
@@ -467,6 +511,35 @@ def selected_led_to_event_type(led):
         return "emergency"
     return None
 
+def run_power_cut_server():
+    """Run a simple HTTP server to receive power cut signals."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    
+    class PowerCutHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path == '/power_cut':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data.decode('utf-8'))
+                machine_name = data.get('machine_name')
+                if machine_name == TEAM_NAME:
+                    handle_power_cut()
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
+                else:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Invalid machine name"}).encode('utf-8'))
+            else:
+                self.send_response(404)
+                self.end_headers()
+    
+    server = HTTPServer(('0.0.0.0', 8000), PowerCutHandler)
+    logger.info("Starting power cut server on port 8000")
+    server.serve_forever()
+
 def main():
     global TEAM_NAME
     try:
@@ -482,6 +555,10 @@ def main():
         
         setup_gpio()
         time.sleep(0.1)
+        
+        # Start power cut server in a separate thread
+        power_cut_thread = threading.Thread(target=run_power_cut_server, daemon=True)
+        power_cut_thread.start()
         
         if lcd:
             try:
