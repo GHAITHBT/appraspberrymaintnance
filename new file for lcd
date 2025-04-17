@@ -36,10 +36,10 @@ BUTTON_CANCEL = 13
 SENSOR_OBSTACLE = 4
 
 # Power cut signal GPIO (relay control)
-POWER_CUT_RELAY = 14  # Changed to GPIO 14 for power cut relay
+POWER_CUT_RELAY = 14
 
 # Main Flask app API base URL
-MAIN_API_BASE_URL = "http://10.110.3.102:1250/api"  # Ensure this matches Flask server
+MAIN_API_BASE_URL = "http://10.110.3.102:1250/api"
 
 # MySQL Database Configuration
 DB_CONFIG = {
@@ -134,7 +134,6 @@ def fetch_machine_name_from_db(ip_address):
             logger.info("MySQL connection closed")
 
 def test_api_connectivity():
-    """Test connectivity to the Flask API on startup."""
     try:
         url = f"{MAIN_API_BASE_URL}/test_connectivity"
         data = {"source": "RaspberryPi", "ip": get_ip_address(), "timestamp": time.time()}
@@ -162,7 +161,6 @@ def test_api_connectivity():
         print(f"Unexpected error in API connectivity test: {e}")
 
 def periodic_api_test():
-    """Periodically test API connectivity every 60 seconds."""
     while True:
         logger.info("Starting periodic API connectivity test")
         test_api_connectivity()
@@ -178,7 +176,7 @@ def setup_gpio():
         GPIO.setup(LED_EMERGENCY, GPIO.OUT)
         GPIO.setup(LED_DOWNTIME_ALERT, GPIO.OUT)
         GPIO.setup(LED_CANCEL, GPIO.OUT)
-        GPIO.setup(POWER_CUT_RELAY, GPIO.OUT)  # Setup power cut relay pin (GPIO 14)
+        GPIO.setup(POWER_CUT_RELAY, GPIO.OUT)
         
         GPIO.setup(BUTTON_DOWNTIME, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(BUTTON_MAINTENANCE, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -192,7 +190,7 @@ def setup_gpio():
         GPIO.output(LED_EMERGENCY, GPIO.HIGH)
         GPIO.output(LED_DOWNTIME_ALERT, GPIO.HIGH)
         GPIO.output(LED_CANCEL, GPIO.HIGH)
-        GPIO.output(POWER_CUT_RELAY, GPIO.LOW)  # Ensure power cut relay is off initially
+        GPIO.output(POWER_CUT_RELAY, GPIO.LOW)
         time.sleep(2)
         GPIO.output(LED_DOWNTIME, GPIO.LOW)
         GPIO.output(LED_MAINTENANCE, GPIO.LOW)
@@ -206,32 +204,31 @@ def setup_gpio():
         logger.error(f"GPIO setup error: {e}\n{traceback.format_exc()}")
         print(f"GPIO setup error: {e}")
 
-def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=None, start_comment=None, end_comment=None, cancel_reason=None):
+def send_event_async(event_type, machine, start_user_id="SIM123", start_comment="Test simulation"):
     if TEAM_NAME is None:
         logger.error("Cannot send event: TEAM_NAME not set")
+        display_lcd_message("Error: TEAM_NAME\nnot set")
         return
     
     def send_request():
         max_retries = 3
-        retry_delay = 2  # seconds
+        retry_delay = 2
         for attempt in range(max_retries):
             try:
-                url = f"{MAIN_API_BASE_URL}/{event_type}/{TEAM_NAME}"
+                url = f"{MAIN_API_BASE_URL}/{event_type}/{machine}"
                 data = {
-                    "machine": TEAM_NAME,
-                    "duration": duration,
-                    "start_user_id": start_user_id if start_user_id else "N/A",
-                    "end_user_id": end_user_id if end_user_id else "N/A",
-                    "start_comment": start_comment if start_comment else "",
-                    "end_comment": end_comment if end_comment else "",
-                    "cancel_reason": cancel_reason if cancel_reason else ""
+                    "machine": machine,
+                    "start_user_id": start_user_id,
+                    "start_comment": start_comment
                 }
                 headers = {'Content-Type': 'application/json'}
                 logger.info(f"Attempt {attempt + 1}/{max_retries}: Sending event to {url} - Data: {json.dumps(data)} - Headers: {headers}")
                 response = requests.post(url, json=data, headers=headers, timeout=5)
                 logger.info(f"Response received: Status {response.status_code} - Content: {response.text}")
                 if response.status_code == 200:
-                    logger.info(f"Event sent successfully: {event_type} for {TEAM_NAME} - Response: {response.text}")
+                    logger.info(f"Event sent successfully: {event_type} for {machine} - Response: {response.text}")
+                    display_lcd_message(f"{event_type.title()}\nSimulated for\n{machine}")
+                    print(f"{event_type.title()} simulated successfully for {machine}")
                     return
                 else:
                     logger.warning(f"Attempt {attempt + 1}/{max_retries}: Failed to send event: {event_type} - Status: {response.status_code} - Response: {response.text}")
@@ -246,8 +243,10 @@ def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=
             if attempt < max_retries - 1:
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
-        logger.error(f"Failed to send event after {max_retries} attempts: {event_type} for {TEAM_NAME}")
-    
+        logger.error(f"Failed to send event after {max_retries} attempts: {event_type} for {machine}")
+        display_lcd_message(f"Failed to simulate\n{event_type.title()}")
+        print(f"Failed to simulate {event_type} for {machine} after {max_retries} attempts")
+
     Thread(target=send_request, daemon=True).start()
 
 def reset_system(event_type=None, end_user_id=None, end_comment=None, cancel_reason=None):
@@ -258,14 +257,14 @@ def reset_system(event_type=None, end_user_id=None, end_comment=None, cancel_rea
         logger.info(f"Event {event_type} ended for {TEAM_NAME}. Duration: {duration:.2f} seconds")
         print(f"Event {event_type} ended. Duration: {duration:.2f} seconds")
         event_prefix = "cancel_" if cancel_reason else "reset_"
-        send_event_async(f"{event_prefix}{event_type}", duration, start_user_id, end_user_id, start_comment, end_comment, cancel_reason)
+        send_event_async(f"{event_prefix}{event_type}", TEAM_NAME, start_user_id, start_comment)
     
     GPIO.output(LED_DOWNTIME, GPIO.LOW)
     GPIO.output(LED_MAINTENANCE, GPIO.LOW)
     GPIO.output(LED_EMERGENCY, GPIO.LOW)
     GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
     GPIO.output(LED_CANCEL, GPIO.LOW)
-    GPIO.output(POWER_CUT_RELAY, GPIO.LOW)  # Turn off relay on reset
+    GPIO.output(POWER_CUT_RELAY, GPIO.LOW)
     last_sensor_trigger = time.time()
     downtime_triggered = False
     selected_led = None
@@ -295,7 +294,6 @@ def reset_system(event_type=None, end_user_id=None, end_comment=None, cancel_rea
         print("\n====================\nLCD: System Reset\n====================\n")
 
 def display_lcd_message(message):
-    """Display a message on the 20x4 LCD, wrapping text to fit."""
     if lcd:
         try:
             lcd.clear()
@@ -323,7 +321,6 @@ def display_lcd_message(message):
     print("="*20 + "\n")
 
 def get_input_with_lcd(prompt):
-    """Get input from keyboard and display it on LCD in real-time."""
     display_lcd_message(prompt)
     input_str = ""
     fd = sys.stdin.fileno()
@@ -332,13 +329,12 @@ def get_input_with_lcd(prompt):
         tty.setraw(sys.stdin.fileno())
         while True:
             char = sys.stdin.read(1)
-            if char == '\r' or char == '\n':  # Enter key
+            if char == '\r' or char == '\n':
                 break
-            elif char == '\x7f':  # Backspace
+            elif char == '\x7f':
                 input_str = input_str[:-1]
             elif char.isprintable():
                 input_str += char
-            # Update LCD with current input
             if lcd:
                 try:
                     lcd.clear()
@@ -351,7 +347,7 @@ def get_input_with_lcd(prompt):
             print(f"\rInput: {input_str}", end="")
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        print()  # New line after input
+        print()
     logger.info(f"User entered: {input_str}")
     return input_str.strip()
 
@@ -395,10 +391,9 @@ def get_cancel_reason_from_input():
             display_lcd_message("Reason cannot be\nempty. Try again:")
 
 def handle_power_cut():
-    """Handle power cut signal received from Flask app."""
     global power_cut_active
     power_cut_active = True
-    GPIO.output(POWER_CUT_RELAY, GPIO.HIGH)  # Activate relay (HIGH signal to cut power)
+    GPIO.output(POWER_CUT_RELAY, GPIO.HIGH)
     display_lcd_message("Power Cut!\nMaintenance Overdue")
     logger.info("Power cut signal received, relay (GPIO 14) set to HIGH")
     print("Power cut signal received, relay (GPIO 14) set to HIGH")
@@ -486,11 +481,7 @@ def monitor_buttons_and_downtime():
                         selected_led = LED_DOWNTIME
                         downtime_triggered = False
                         event_start_time = time.time()
-                        awaiting_user_id = True
-                        start_user_id = get_user_id_from_input("Enter User ID to\nstart downtime:")
-                        start_comment = get_comment_from_input("Enter Start Comment\n(or press Enter to\nskip):")
-                        send_event_async("downtime", start_user_id=start_user_id, start_comment=start_comment)
-                        awaiting_user_id = False
+                        send_event_async("downtime", TEAM_NAME)
                         display_lcd_message("Downtime Started")
                 
                 elif prev_maintenance == GPIO.HIGH and curr_maintenance == GPIO.LOW:
@@ -509,11 +500,7 @@ def monitor_buttons_and_downtime():
                         selected_led = LED_MAINTENANCE
                         downtime_triggered = False
                         event_start_time = time.time()
-                        awaiting_user_id = True
-                        start_user_id = get_user_id_from_input("Enter User ID to\nstart maintenance:")
-                        start_comment = get_comment_from_input("Enter Start Comment\n(or press Enter to\nskip):")
-                        send_event_async("maintenance", start_user_id=start_user_id, start_comment=start_comment)
-                        awaiting_user_id = False
+                        send_event_async("maintenance", TEAM_NAME)
                         display_lcd_message("Maintenance Started")
                 
                 elif prev_emergency == GPIO.HIGH and curr_emergency == GPIO.LOW:
@@ -532,11 +519,7 @@ def monitor_buttons_and_downtime():
                         selected_led = LED_EMERGENCY
                         downtime_triggered = False
                         event_start_time = time.time()
-                        awaiting_user_id = True
-                        start_user_id = get_user_id_from_input("Enter User ID to\nstart emergency:")
-                        start_comment = get_comment_from_input("Enter Start Comment\n(or press Enter to\nskip):")
-                        send_event_async("emergency", start_user_id=start_user_id, start_comment=start_comment)
-                        awaiting_user_id = False
+                        send_event_async("emergency", TEAM_NAME)
                         display_lcd_message("Emergency Started")
                 
                 elif prev_cancel == GPIO.HIGH and curr_cancel == GPIO.LOW and selected_led:
@@ -572,7 +555,6 @@ def selected_led_to_event_type(led):
     return None
 
 def run_power_cut_server():
-    """Run a simple HTTP server to receive power cut signals."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
     
     class PowerCutHandler(BaseHTTPRequestHandler):
@@ -640,17 +622,14 @@ def main():
             logger.error("Failed to retrieve machine name. Using default 'Unknown'")
             TEAM_NAME = "Unknown"
         
-        # Test API connectivity
         test_api_connectivity()
         
-        # Start periodic API test in a separate thread
         api_test_thread = threading.Thread(target=periodic_api_test, daemon=True)
         api_test_thread.start()
         
         setup_gpio()
         time.sleep(0.1)
         
-        # Start power cut server in a separate thread
         power_cut_thread = threading.Thread(target=run_power_cut_server, daemon=True)
         power_cut_thread.start()
         
