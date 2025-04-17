@@ -38,7 +38,7 @@ SENSOR_OBSTACLE = 4
 POWER_CUT_RELAY = 18  # Adjust as per your hardware setup
 
 # Main Flask app API base URL
-MAIN_API_BASE_URL = "http://10.110.3.102:1250/api"  # Updated to match Flask app host
+MAIN_API_BASE_URL = "http://10.110.3.102:1250/api"  # Ensure this matches Flask server
 
 # MySQL Database Configuration
 DB_CONFIG = {
@@ -126,6 +126,24 @@ def fetch_machine_name_from_db(ip_address):
         if 'connection' in locals() and connection.is_connected():
             connection.close()
 
+def test_api_connectivity():
+    """Test connectivity to the Flask API on startup."""
+    try:
+        url = f"{MAIN_API_BASE_URL}/test_connectivity"
+        data = {"source": "RaspberryPi", "ip": get_ip_address(), "timestamp": time.time()}
+        headers = {'Content-Type': 'application/json'}
+        logger.info(f"Testing API connectivity to {url} with data: {json.dumps(data)}")
+        response = requests.post(url, json=data, headers=headers, timeout=5)
+        if response.status_code == 200:
+            logger.info(f"API connectivity test successful: {response.text}")
+            print(f"API connectivity test successful: {response.text}")
+        else:
+            logger.warning(f"API connectivity test failed: Status {response.status_code} - {response.text}")
+            print(f"API connectivity test failed: Status {response.status_code} - {response.text}")
+    except Exception as e:
+        logger.error(f"API connectivity test error: {e}")
+        print(f"API connectivity test error: {e}")
+
 def setup_gpio():
     try:
         GPIO.setmode(GPIO.BCM)
@@ -169,26 +187,34 @@ def send_event_async(event_type, duration=None, start_user_id=None, end_user_id=
         return
     
     def send_request():
-        try:
-            url = f"{MAIN_API_BASE_URL}/{event_type}/{TEAM_NAME}"
-            data = {
-                "machine": TEAM_NAME,
-                "duration": duration,
-                "start_user_id": start_user_id if start_user_id else "N/A",
-                "end_user_id": end_user_id if end_user_id else "N/A",
-                "start_comment": start_comment if start_comment else "",
-                "end_comment": end_comment if end_comment else "",
-                "cancel_reason": cancel_reason if cancel_reason else ""
-            }
-            headers = {'Content-Type': 'application/json'}
-            logger.info(f"Sending event to {url} - Details: {json.dumps(data)}")
-            response = requests.post(url, json=data, headers=headers, timeout=5)
-            if response.status_code == 200:
-                logger.info(f"Event sent successfully: {event_type} for {TEAM_NAME} - Response: {response.text}")
-            else:
-                logger.warning(f"Failed to send event: {event_type} - Status: {response.status_code} - Response: {response.text}")
-        except Exception as e:
-            logger.error(f"Error sending {event_type} event to {url}: {e} - Data: {json.dumps(data)}")
+        max_retries = 3
+        retry_delay = 2  # seconds
+        for attempt in range(max_retries):
+            try:
+                url = f"{MAIN_API_BASE_URL}/{event_type}/{TEAM_NAME}"
+                data = {
+                    "machine": TEAM_NAME,
+                    "duration": duration,
+                    "start_user_id": start_user_id if start_user_id else "N/A",
+                    "end_user_id": end_user_id if end_user_id else "N/A",
+                    "start_comment": start_comment if start_comment else "",
+                    "end_comment": end_comment if end_comment else "",
+                    "cancel_reason": cancel_reason if cancel_reason else ""
+                }
+                headers = {'Content-Type': 'application/json'}
+                logger.info(f"Attempt {attempt + 1}/{max_retries}: Sending event to {url} - Details: {json.dumps(data)}")
+                response = requests.post(url, json=data, headers=headers, timeout=5)
+                if response.status_code == 200:
+                    logger.info(f"Event sent successfully: {event_type} for {TEAM_NAME} - Response: {response.text}")
+                    return
+                else:
+                    logger.warning(f"Attempt {attempt + 1}/{max_retries}: Failed to send event: {event_type} - Status: {response.status_code} - Response: {response.text}")
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1}/{max_retries}: Error sending {event_type} event to {url}: {e} - Data: {json.dumps(data)}")
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+        logger.error(f"Failed to send event after {max_retries} attempts: {event_type} for {TEAM_NAME}")
     
     Thread(target=send_request, daemon=True).start()
 
@@ -552,6 +578,9 @@ def main():
         if not TEAM_NAME:
             logger.error("Failed to retrieve machine name. Using default 'Unknown'")
             TEAM_NAME = "Unknown"
+        
+        # Test API connectivity
+        test_api_connectivity()
         
         setup_gpio()
         time.sleep(0.1)
