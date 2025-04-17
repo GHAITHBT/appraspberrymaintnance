@@ -5,8 +5,6 @@ import logging
 import requests
 import socket
 from threading import Thread
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import json
 
 # Setup logging
 logging.basicConfig(
@@ -21,30 +19,28 @@ LED_DOWNTIME = 8
 LED_MAINTENANCE = 7
 LED_EMERGENCY = 12
 LED_DOWNTIME_ALERT = 17
-POWER_CUT_RELAY = 14  # Added for power cut relay
 
 BUTTON_DOWNTIME = 11
 BUTTON_MAINTENANCE = 5
 BUTTON_EMERGENCY = 6
 SENSOR_OBSTACLE = 3
 
-# Main Flask app API base URL
+# Main Flask app API base URL (external server)
 MAIN_API_BASE_URL = "http://10.110.30.15:1250/api"
 
 # Global state
-TEAM_NAME = None
+TEAM_NAME = None  # Will be set dynamically
 last_sensor_trigger = time.time()
 downtime_triggered = False
 selected_led = None
 is_first_run = True
 event_start_time = None
-power_cut_active = False
 
 def get_ip_address():
     """Get the Raspberry Pi's IP address."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
+        s.connect(("8.8.8.8", 80))  # Connect to a public server to get local IP
         ip_address = s.getsockname()[0]
         s.close()
         logger.info(f"Retrieved IP address: {ip_address}")
@@ -58,9 +54,7 @@ def fetch_machine_name(ip_address):
     try:
         url = f"{MAIN_API_BASE_URL}/get_machine_name"
         data = {"ip_address": ip_address}
-        headers = {'Content-Type': 'application/json'}
-        logger.info(f"Fetching machine name from {url} with data: {json.dumps(data)}")
-        response = requests.post(url, json=data, headers=headers, timeout=5)
+        response = requests.post(url, json=data, timeout=5)
         if response.status_code == 200:
             machine_name = response.json().get("machine_name")
             logger.info(f"Retrieved machine name: {machine_name} for IP: {ip_address}")
@@ -81,7 +75,6 @@ def setup_gpio():
         GPIO.setup(LED_MAINTENANCE, GPIO.OUT)
         GPIO.setup(LED_EMERGENCY, GPIO.OUT)
         GPIO.setup(LED_DOWNTIME_ALERT, GPIO.OUT)
-        GPIO.setup(POWER_CUT_RELAY, GPIO.OUT)  # Setup power cut relay
         
         GPIO.setup(BUTTON_DOWNTIME, GPIO.IN)
         GPIO.setup(BUTTON_MAINTENANCE, GPIO.IN)
@@ -93,13 +86,11 @@ def setup_gpio():
         GPIO.output(LED_MAINTENANCE, GPIO.HIGH)
         GPIO.output(LED_EMERGENCY, GPIO.HIGH)
         GPIO.output(LED_DOWNTIME_ALERT, GPIO.HIGH)
-        GPIO.output(POWER_CUT_RELAY, GPIO.LOW)  # Ensure relay is off
         time.sleep(2)
         GPIO.output(LED_DOWNTIME, GPIO.LOW)
         GPIO.output(LED_MAINTENANCE, GPIO.LOW)
         GPIO.output(LED_EMERGENCY, GPIO.LOW)
         GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
-        GPIO.output(POWER_CUT_RELAY, GPIO.LOW)
         
         logger.info("GPIO setup completed successfully")
     except Exception as e:
@@ -118,9 +109,7 @@ def send_event_async(event_type, duration=None):
                 "machine_name": TEAM_NAME,
                 "duration": duration if duration is not None else 0
             }
-            headers = {'Content-Type': 'application/json'}
-            logger.info(f"Sending event to {url} with data: {json.dumps(data)}")
-            response = requests.post(url, json=data, headers=headers, timeout=5)
+            response = requests.post(url, json=data, timeout=5)
             if response.status_code == 200:
                 logger.info(f"Successfully sent {event_type} event for {TEAM_NAME} to {url} with duration {duration}")
             else:
@@ -130,16 +119,8 @@ def send_event_async(event_type, duration=None):
     
     Thread(target=send_request, daemon=True).start()
 
-def handle_power_cut():
-    """Handle power cut signal received from Flask app."""
-    global power_cut_active
-    power_cut_active = True
-    GPIO.output(POWER_CUT_RELAY, GPIO.HIGH)  # Activate relay
-    logger.info("Power cut signal received, relay (GPIO 14) set to HIGH")
-    print("Power cut signal received, relay (GPIO 14) set to HIGH")
-
 def reset_system(event_type=None):
-    global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time, power_cut_active
+    global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time
     duration = None
     if event_type and event_start_time:
         duration = time.time() - event_start_time
@@ -151,68 +132,13 @@ def reset_system(event_type=None):
     GPIO.output(LED_MAINTENANCE, GPIO.LOW)
     GPIO.output(LED_EMERGENCY, GPIO.LOW)
     GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
-    GPIO.output(POWER_CUT_RELAY, GPIO.LOW)  # Turn off relay
     last_sensor_trigger = time.time()
     downtime_triggered = False
     selected_led = None
     event_start_time = None
     is_first_run = True
-    power_cut_active = False
-    logger.info("System reset, power cut relay turned off")
-    print("System reset, power cut relay turned off")
-
-def run_power_cut_server():
-    """Run a simple HTTP server to receive power cut signals."""
-    class PowerCutHandler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            try:
-                if self.path == '/power_cut':
-                    content_length = int(self.headers['Content-Length'])
-                    post_data = self.rfile.read(content_length)
-                    try:
-                        data = json.loads(post_data.decode('utf-8'))
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Invalid JSON in power cut request: {e}\nData: {post_data}")
-                        self.send_response(400)
-                        self.send_header('Content-type', 'application/json')
-                        self.end_headers()
-                        self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
-                        return
-                    machine_name = data.get('machine_name')
-                    logger.info(f"Received power cut request: {data}")
-                    if machine_name == TEAM_NAME:
-                        handle_power_cut()
-                        self.send_response(200)
-                        self.send_header('Content-type', 'application/json')
-                        self.end_headers()
-                        self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
-                        logger.info("Power cut request processed successfully")
-                    else:
-                        logger.warning(f"Power cut request rejected: Invalid machine name {machine_name}")
-                        self.send_response(400)
-                        self.send_header('Content-type', 'application/json')
-                        self.end_headers()
-                        self.wfile.write(json.dumps({"error": "Invalid machine name"}).encode('utf-8'))
-                else:
-                    logger.warning(f"Invalid power cut request path: {self.path}")
-                    self.send_response(404)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
-            except Exception as e:
-                logger.error(f"Error processing power cut request: {e}")
-                self.send_response(500)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "Server error"}).encode('utf-8'))
-    
-    try:
-        server = HTTPServer(('0.0.0.0', 8000), PowerCutHandler)
-        logger.info("Starting power cut server on port 8000")
-        server.serve_forever()
-    except Exception as e:
-        logger.error(f"Power cut server failed to start: {e}")
-        print(f"Power cut server failed to start: {e}")
+    logger.info("System reset")
+    print("System reset")
 
 def monitor_buttons_and_downtime():
     global last_sensor_trigger, downtime_triggered, selected_led, is_first_run, event_start_time
@@ -239,7 +165,7 @@ def monitor_buttons_and_downtime():
                 if downtime_triggered or selected_led:
                     reset_system(selected_led_to_event_type(selected_led))
             
-            if time.time() - last_sensor_trigger > 5 and not downtime_triggered and not selected_led and not power_cut_active:
+            if time.time() - last_sensor_trigger > 5 and not downtime_triggered and not selected_led:
                 logger.info(f"5 seconds passed without sensor trigger for {TEAM_NAME} - Turning on all LEDs")
                 print("5 seconds passed without sensor trigger - Turning on all LEDs")
                 GPIO.output(LED_DOWNTIME, GPIO.HIGH)
@@ -249,48 +175,47 @@ def monitor_buttons_and_downtime():
                 downtime_triggered = True
                 is_first_run = False
             
-            if not power_cut_active:
-                if prev_downtime == GPIO.HIGH and curr_downtime == GPIO.LOW:
-                    if selected_led == LED_DOWNTIME:
-                        reset_system("downtime")
-                    elif downtime_triggered and not selected_led:
-                        logger.info(f"Downtime button PRESSED on GPIO {BUTTON_DOWNTIME} for {TEAM_NAME}")
-                        print(f"Downtime button PRESSED on GPIO {BUTTON_DOWNTIME}")
-                        GPIO.output(LED_MAINTENANCE, GPIO.LOW)
-                        GPIO.output(LED_EMERGENCY, GPIO.LOW)
-                        GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
-                        selected_led = LED_DOWNTIME
-                        downtime_triggered = False
-                        event_start_time = time.time()
-                        send_event_async("downtime")
-                
-                elif prev_maintenance == GPIO.HIGH and curr_maintenance == GPIO.LOW:
-                    if selected_led == LED_MAINTENANCE:
-                        reset_system("maintenance")
-                    elif downtime_triggered and not selected_led:
-                        logger.info(f"Maintenance button PRESSED on GPIO {BUTTON_MAINTENANCE} for {TEAM_NAME}")
-                        print(f"Maintenance button PRESSED on GPIO {BUTTON_MAINTENANCE}")
-                        GPIO.output(LED_DOWNTIME, GPIO.LOW)
-                        GPIO.output(LED_EMERGENCY, GPIO.LOW)
-                        GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
-                        selected_led = LED_MAINTENANCE
-                        downtime_triggered = False
-                        event_start_time = time.time()
-                        send_event_async("maintenance")
-                
-                elif prev_emergency == GPIO.HIGH and curr_emergency == GPIO.LOW:
-                    if selected_led == LED_EMERGENCY:
-                        reset_system("emergency")
-                    elif downtime_triggered and not selected_led:
-                        logger.info(f"Emergency button PRESSED on GPIO {BUTTON_EMERGENCY} for {TEAM_NAME}")
-                        print(f"Emergency button PRESSED on GPIO {BUTTON_EMERGENCY}")
-                        GPIO.output(LED_DOWNTIME, GPIO.LOW)
-                        GPIO.output(LED_MAINTENANCE, GPIO.LOW)
-                        GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
-                        selected_led = LED_EMERGENCY
-                        downtime_triggered = False
-                        event_start_time = time.time()
-                        send_event_async("emergency")
+            if prev_downtime == GPIO.HIGH and curr_downtime == GPIO.LOW:
+                if selected_led == LED_DOWNTIME:
+                    reset_system("downtime")
+                elif downtime_triggered and not selected_led:
+                    logger.info(f"Downtime button PRESSED on GPIO {BUTTON_DOWNTIME} for {TEAM_NAME}")
+                    print(f"Downtime button PRESSED on GPIO {BUTTON_DOWNTIME}")
+                    GPIO.output(LED_MAINTENANCE, GPIO.LOW)
+                    GPIO.output(LED_EMERGENCY, GPIO.LOW)
+                    GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+                    selected_led = LED_DOWNTIME
+                    downtime_triggered = False
+                    event_start_time = time.time()
+                    send_event_async("downtime")
+            
+            elif prev_maintenance == GPIO.HIGH and curr_maintenance == GPIO.LOW:
+                if selected_led == LED_MAINTENANCE:
+                    reset_system("maintenance")
+                elif downtime_triggered and not selected_led:
+                    logger.info(f"Maintenance button PRESSED on GPIO {BUTTON_MAINTENANCE} for {TEAM_NAME}")
+                    print(f"Maintenance button PRESSED on GPIO {BUTTON_MAINTENANCE}")
+                    GPIO.output(LED_DOWNTIME, GPIO.LOW)
+                    GPIO.output(LED_EMERGENCY, GPIO.LOW)
+                    GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+                    selected_led = LED_MAINTENANCE
+                    downtime_triggered = False
+                    event_start_time = time.time()
+                    send_event_async("maintenance")
+            
+            elif prev_emergency == GPIO.HIGH and curr_emergency == GPIO.LOW:
+                if selected_led == LED_EMERGENCY:
+                    reset_system("emergency")
+                elif downtime_triggered and not selected_led:
+                    logger.info(f"Emergency button PRESSED on GPIO {BUTTON_EMERGENCY} for {TEAM_NAME}")
+                    print(f"Emergency button PRESSED on GPIO {BUTTON_EMERGENCY}")
+                    GPIO.output(LED_DOWNTIME, GPIO.LOW)
+                    GPIO.output(LED_MAINTENANCE, GPIO.LOW)
+                    GPIO.output(LED_DOWNTIME_ALERT, GPIO.LOW)
+                    selected_led = LED_EMERGENCY
+                    downtime_triggered = False
+                    event_start_time = time.time()
+                    send_event_async("emergency")
             
             if selected_led:
                 if time.time() - last_flash_time >= 0.25:
@@ -323,6 +248,7 @@ def main():
         GPIO.cleanup()
         logger.info("Initial GPIO cleanup completed")
         
+        # Get IP and fetch machine name
         ip_address = get_ip_address()
         if ip_address:
             TEAM_NAME = fetch_machine_name(ip_address)
@@ -332,9 +258,6 @@ def main():
         
         setup_gpio()
         time.sleep(0.1)
-        
-        power_cut_thread = threading.Thread(target=run_power_cut_server, daemon=True)
-        power_cut_thread.start()
         
         monitor_thread = threading.Thread(target=monitor_buttons_and_downtime, daemon=True)
         monitor_thread.start()
